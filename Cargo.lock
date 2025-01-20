@@ -1277,6 +1277,7 @@ dependencies = [
  "lzma-rs",
  "regex",
  "reqwest",
+ "serde",
  "serde_json",
  "tokio",
 ]
