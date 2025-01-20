@@ -7,3 +7,5 @@ edition = "2021"
 lzma-rs = { version = "0.3.0" }
 reqwest = { version = "0.12.12", features = [] }
 tokio = { version = "1.43.0", features = ["rt", "rt-multi-thread", "macros"] }
+regex = "1.11.1"
+serde_json = "1.0.137"
