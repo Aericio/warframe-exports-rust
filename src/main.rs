@@ -1,7 +1,7 @@
 use regex::Regex;
 use reqwest::Client;
 use reqwest::Url;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::error::Error;
 use std::fs;
@@ -26,7 +26,7 @@ static MANIFEST_PATH: &'static str = "/PublicExport/Manifest/";
 async fn main() -> Result<(), Box<dyn Error>> {
     // An HTTP client to share between all requests.
     let client = Client::new();
-    
+
     // A utility function for unwrapping results with no default value.
     let unwrap_none = "None".to_string();
 
@@ -41,7 +41,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let export_indices = fetch_export_indices(&client).await?;
     // println!("{:#?}", export_indices);
 
-    let mut export_hashes: HashMap<String, String> = HashMap::new();
+    let mut export_hashes: BTreeMap<String, String> = BTreeMap::new();
     if Path::new(EXPORT_HASH_LOCATION).is_file() {
         let existing_hashes = fs::read_to_string(EXPORT_HASH_LOCATION)?;
         export_hashes = serde_json::from_str(&existing_hashes)?;
@@ -62,7 +62,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
 
             updated_hash = true;
-            
+
             // Got None, meaning a new resource.
             if *existing_resource == unwrap_none {
                 println!(
