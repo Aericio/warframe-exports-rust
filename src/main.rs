@@ -5,7 +5,6 @@ use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::env;
 use std::error::Error;
-use std::fmt::format;
 use std::fs;
 use std::io::{BufReader, Cursor};
 use std::path::Path;
@@ -57,51 +56,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let export_indices = fetch_export_indices(&client).await?;
     // println!("{:#?}", export_indices);
 
-    // Check for existing downloads
-    let mut export_hashes = restore_map(EXPORT_HASH_LOCATION)?;
-
-    // let re = Regex::new(r"(_en|\.json)").unwrap();
-    let mut updated_hash = false;
-    let mut updated_manifest = false;
-    let mut lines = export_indices.lines();
-    while let Some(line) = lines.next() {
-        // println!("{:#?}", line);
-        if let Some((resource_name, resource_hash)) = line.split_once("!") {
-            let existing_resource = export_hashes.get(resource_name).unwrap_or(&unwrap_none);
-
-            // Matching resource was found
-            if existing_resource == resource_hash {
-                continue;
-            }
-
-            updated_hash = true;
-            updated_manifest = resource_name == "ExportManifest.json";
-
-            // Got None, meaning a new resource.
-            if *existing_resource == unwrap_none {
-                println!(
-                    "Added a new resource ➞ {} ({})",
-                    resource_name, resource_hash
-                );
-            } else {
-                // An updated resource was found.
-                println!(
-                    "Updated an existing resource ➞ {} ({} from {})",
-                    resource_name, resource_hash, existing_resource
-                );
-            }
-
-            download_file(
-                &client,
-                &format!("{}{}/{}", WARFRAME_CONTENT_URL, MANIFEST_PATH, line),
-                &format!("{}/{}", STORAGE_FOLDERS[2], resource_name),
-                true,
-            )
-            .await?;
-
-            export_hashes.insert(resource_name.to_string(), resource_hash.to_string());
-        }
-    }
+    let (export_hashes, updated_hash, updated_manifest) =
+        download_exports(&client, export_indices, &unwrap_none).await?;
 
     if updated_hash {
         let json = serde_json::to_string(&export_hashes)?;
@@ -179,6 +135,59 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+async fn download_exports(
+    client: &Client,
+    export_indices: String,
+    unwrap_none: &String,
+) -> Result<(BTreeMap<String, String>, bool, bool), Box<dyn Error>> {
+    // Check for existing downloads
+    let mut export_hashes = restore_map(EXPORT_HASH_LOCATION)?;
+
+    // let re = Regex::new(r"(_en|\.json)").unwrap();
+    let mut updated_hash = false;
+    let mut updated_manifest = false;
+    let mut lines = export_indices.lines();
+    while let Some(line) = lines.next() {
+        // println!("{:#?}", line);
+        if let Some((resource_name, resource_hash)) = line.split_once("!") {
+            let existing_resource = export_hashes.get(resource_name).unwrap_or(&unwrap_none);
+
+            // Matching resource was found
+            if existing_resource == resource_hash {
+                continue;
+            }
+
+            updated_hash = true;
+            updated_manifest = resource_name == "ExportManifest.json";
+
+            // Got None, meaning a new resource.
+            if *existing_resource == *unwrap_none {
+                println!(
+                    "Added a new resource ➞ {} ({})",
+                    resource_name, resource_hash
+                );
+            } else {
+                // An updated resource was found.
+                println!(
+                    "Updated an existing resource ➞ {} ({} from {})",
+                    resource_name, resource_hash, existing_resource
+                );
+            }
+
+            download_file(
+                &client,
+                &format!("{}{}/{}", WARFRAME_CONTENT_URL, MANIFEST_PATH, line),
+                &format!("{}/{}", STORAGE_FOLDERS[2], resource_name),
+                true,
+            )
+            .await?;
+
+            export_hashes.insert(resource_name.to_string(), resource_hash.to_string());
+        }
+    }
+    Ok((export_hashes, updated_hash, updated_manifest))
 }
 
 fn restore_map(file_path: &str) -> Result<BTreeMap<String, String>, Box<dyn Error>> {
