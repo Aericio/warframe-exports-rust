@@ -9,6 +9,8 @@ use std::fs;
 use std::io::{BufReader, Cursor};
 use std::path::Path;
 use std::string::ToString;
+use std::sync::Arc;
+use tokio::task::JoinSet;
 
 /// Environment Variables
 /// WARFRAME_ORIGIN_URL - No trailing slash!
@@ -37,10 +39,10 @@ struct ExportManifest {
     Manifest: Vec<ExportManifestItem>,
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread", worker_threads = 5)]
 async fn main() -> Result<(), Box<dyn Error>> {
     // An HTTP client to share between all requests.
-    let client = Client::new();
+    let client = Arc::new(Client::new());
 
     // A utility function for unwrapping results with no default value.
     let unwrap_none = "None".to_string();
@@ -54,37 +56,37 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let export_indices = fetch_export_indices(&client).await?;
-    // println!("{:#?}", export_indices);
 
     let (export_hashes, updated_hash, updated_manifest) =
         download_exports(&client, export_indices, &unwrap_none).await?;
 
     if updated_hash {
         let json = serde_json::to_string(&export_hashes)?;
-        println!("Wrote hashes to {}", EXPORT_HASH_LOCATION);
+        println!("Saved export hashes ➞ {}", EXPORT_HASH_LOCATION);
         fs::write(EXPORT_HASH_LOCATION, json)?;
 
-        // Now, download images!
         if updated_manifest {
+            let mut download_set = JoinSet::new();
+
             let mut image_hashes = restore_map(IMAGE_HASH_LOCATION)?;
 
             let export_manifest =
                 fs::read_to_string(format!("{}/{}", STORAGE_FOLDERS[2], "ExportManifest.json"))?;
             let export_manifest: ExportManifest = serde_json::from_str(&export_manifest)?;
 
-            let mut int = 0;
+            let mut i = 0;
             for ExportManifestItem {
                 texture_location,
                 unique_name,
             } in export_manifest.Manifest
             {
+                if i == 5 {
+                    break;
+                } else {
+                    i += 1;
+                }
+                
                 if let Some((resource_path, resource_hash)) = texture_location.split_once("!") {
-                    if int == 5 {
-                        break;
-                    } else {
-                        int += 1
-                    }
-
                     let cleaned_name = &unique_name.replace("/", ".")[1..];
                     let existing_resource = image_hashes.get(resource_path).unwrap_or(&unwrap_none);
 
@@ -107,31 +109,36 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         );
                     }
 
-                    download_file(
-                        &client,
-                        &format!(
-                            "{}{}/{}",
-                            WARFRAME_CONTENT_URL,
-                            PUBLIC_EXPORT_PATH,
-                            &texture_location[1..]
-                        ),
-                        &format!("{}/{}.png", STORAGE_FOLDERS[1], cleaned_name),
-                        false,
-                    )
-                    .await?;
+                    let client = Arc::clone(&client);
+                    let download_url = format!(
+                        "{}{}/{}",
+                        WARFRAME_CONTENT_URL,
+                        PUBLIC_EXPORT_PATH,
+                        &texture_location[1..]
+                    );
+                    let download_path = format!("{}/{}.png", STORAGE_FOLDERS[1], &cleaned_name);
+
+                    download_set.spawn(async move {
+                        download_file(&client, &download_url, &download_path, false)
+                            .await
+                            .unwrap()
+                    });
 
                     image_hashes.insert(resource_path.to_string(), resource_hash.to_string());
                 }
             }
+            
+            // Wait for all downloads to finish...
+            download_set.join_all().await;
 
             let json = serde_json::to_string(&image_hashes)?;
-            println!("Wrote hashes to {}", IMAGE_HASH_LOCATION);
+            println!("Saved image hashes ➞ {}", IMAGE_HASH_LOCATION);
             fs::write(IMAGE_HASH_LOCATION, json)?;
         } else {
-            println!("Manifest was not updated")
+            println!("No changes found in export manifest!")
         }
     } else {
-        println!("No hashes to update!");
+        println!("No exports to update!");
     }
 
     Ok(())
@@ -201,8 +208,8 @@ fn restore_map(file_path: &str) -> Result<BTreeMap<String, String>, Box<dyn Erro
 
 async fn fetch_export_indices(client: &Client) -> Result<String, Box<dyn Error>> {
     let origin_url = env::var("WARFRAME_ORIGIN_URL").expect("Missing WARFRAME_ORIGIN_URL");
-    let lzma_url = format!("{}/{}", origin_url, LZMA_URL_PATH);
-    println!("{}", &lzma_url);
+    let lzma_url = format!("{}{}", origin_url, LZMA_URL_PATH);
+    // println!("{}", &lzma_url);
 
     let response = client
         .get(Url::parse(&lzma_url)?)
@@ -228,19 +235,19 @@ async fn download_file(
     client: &Client,
     url: &str,
     save_path: &str,
-    strip_newlines: bool,
+    is_manifest: bool,
 ) -> Result<(), Box<dyn Error>> {
-    print!("Downloading... {}", url);
+    // println!("[DOWNLOAD] {}", url);
 
     let response = client.get(Url::parse(url)?).send().await?;
-    let content = response.text().await?;
 
-    println!("... OK!");
-    if strip_newlines {
+    if is_manifest {
+        let content = response.text().await?;
         let re = Regex::new(r"\\r|\r?\n").unwrap();
         let sanitized_content = re.replace_all(&content, "<NEW_LINE>").to_string();
         fs::write(save_path, sanitized_content)?;
     } else {
+        let content = response.bytes().await?;
         fs::write(save_path, content)?;
     }
 
