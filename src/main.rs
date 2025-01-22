@@ -76,7 +76,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             &Arc::new(true),
         )
         .await?;
-        
+
         // Any hash got updated, only set once.
         if hash {
             updated_hash = true;
@@ -89,21 +89,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Wait for all downloads to finish...
     export_set.join_all().await;
-    
+
     if updated_hash {
         let json = serde_json::to_string(&export_hashes)?;
         println!("Saved export hashes ➞ {}", EXPORT_HASH_LOCATION);
         fs::write(EXPORT_HASH_LOCATION, json).await?;
-    
+
         if updated_manifest {
             let mut image_set = JoinSet::new();
             let mut image_hashes = restore_map(IMAGE_HASH_LOCATION).await?;
-    
+
             let export_manifest: ExportManifest = serde_json::from_str(
                 &fs::read_to_string(format!("{}/{}", STORAGE_FOLDERS[2], "ExportManifest.json"))
                     .await?,
             )?;
-    
+
             for ExportManifestItem {
                 texture_location,
                 unique_name,
@@ -129,10 +129,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 )
                 .await?;
             }
-    
+
             // Wait for all downloads to finish...
             image_set.join_all().await;
-    
+
             let json = serde_json::to_string(&image_hashes)?;
             println!("Saved image hashes ➞ {}", IMAGE_HASH_LOCATION);
             fs::write(IMAGE_HASH_LOCATION, json).await?;
@@ -224,9 +224,9 @@ async fn try_download(
     let client = Arc::clone(client);
     let download_url = Arc::clone(download_url);
     let download_path = Arc::clone(download_path);
-    let download_as_bytes = Arc::clone(download_as_text);
+    let download_as_text = Arc::clone(download_as_text);
     join_set.spawn(async move {
-        download_file(&client, &download_url, &download_path, *download_as_bytes)
+        download_file(&client, &download_url, &download_path, *download_as_text)
             .await
             .unwrap();
     });
