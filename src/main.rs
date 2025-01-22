@@ -5,11 +5,11 @@ use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::env;
 use std::error::Error;
-use std::fs;
 use std::io::{BufReader, Cursor};
 use std::path::Path;
 use std::string::ToString;
 use std::sync::Arc;
+use tokio::fs;
 use tokio::task::JoinSet;
 
 /// Environment Variables
@@ -44,96 +44,98 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // An HTTP client to share between all requests.
     let client = Arc::new(Client::new());
 
-    // A utility function for unwrapping results with no default value.
-    let unwrap_none = "None".to_string();
-
     // Create missing data folders.
     for folder in STORAGE_FOLDERS {
         if Path::new(folder).is_dir() == false {
             println!("{} directory not found, initializing...", folder);
-            fs::create_dir(folder)?;
+            fs::create_dir(folder).await?;
         }
     }
 
-    let export_indices = fetch_export_indices(&client).await?;
+    let mut updated_hash = false;
+    let mut updated_manifest = false;
 
-    let (export_hashes, updated_hash, updated_manifest) =
-        download_exports(&client, export_indices, &unwrap_none).await?;
+    let mut export_set: JoinSet<()> = JoinSet::new();
+    let mut export_hashes = restore_map(EXPORT_HASH_LOCATION).await?;
 
+    let export_index = fetch_export_index(&client).await?;
+    let mut lines = export_index.lines();
+    while let Some(line) = lines.next() {
+        let (hash, manifest) = try_download(
+            &client,
+            &mut export_hashes,
+            &mut export_set,
+            &line.to_string(),
+            &Arc::new(format!(
+                "{}{}/{}",
+                WARFRAME_CONTENT_URL,
+                MANIFEST_PATH,
+                line
+            )),
+            &Arc::new(format!("{}/{}", STORAGE_FOLDERS[2], &line[..(line.len() - 26)])),
+            &Arc::new(true),
+        )
+        .await?;
+        
+        // Any hash got updated, only set once.
+        if hash {
+            updated_hash = true;
+            // Specifically, Manifest hash was updated.
+            if manifest {
+                updated_manifest = true;
+            }
+        }
+    }
+
+    // Wait for all downloads to finish...
+    export_set.join_all().await;
+    
     if updated_hash {
         let json = serde_json::to_string(&export_hashes)?;
         println!("Saved export hashes ➞ {}", EXPORT_HASH_LOCATION);
-        fs::write(EXPORT_HASH_LOCATION, json)?;
-
+        fs::write(EXPORT_HASH_LOCATION, json).await?;
+    
         if updated_manifest {
-            let mut download_set = JoinSet::new();
-
-            let mut image_hashes = restore_map(IMAGE_HASH_LOCATION)?;
-
-            let export_manifest =
-                fs::read_to_string(format!("{}/{}", STORAGE_FOLDERS[2], "ExportManifest.json"))?;
-            let export_manifest: ExportManifest = serde_json::from_str(&export_manifest)?;
-
-            let mut i = 0;
+            let mut image_set = JoinSet::new();
+            let mut image_hashes = restore_map(IMAGE_HASH_LOCATION).await?;
+    
+            let export_manifest: ExportManifest = serde_json::from_str(
+                &fs::read_to_string(format!("{}/{}", STORAGE_FOLDERS[2], "ExportManifest.json"))
+                    .await?,
+            )?;
+    
             for ExportManifestItem {
                 texture_location,
                 unique_name,
             } in export_manifest.Manifest
             {
-                if i == 5 {
-                    break;
-                } else {
-                    i += 1;
-                }
-                
-                if let Some((resource_path, resource_hash)) = texture_location.split_once("!") {
-                    let cleaned_name = &unique_name.replace("/", ".")[1..];
-                    let existing_resource = image_hashes.get(resource_path).unwrap_or(&unwrap_none);
-
-                    // Matching resource was found
-                    if existing_resource == resource_hash {
-                        continue;
-                    }
-
-                    // Got None, meaning a new resource.
-                    if *existing_resource == unwrap_none {
-                        println!(
-                            "Added a new resource ➞ {} ({})",
-                            resource_path, resource_hash
-                        );
-                    } else {
-                        // An updated resource was found.
-                        println!(
-                            "Updated an existing resource ➞ {} ({} from {})",
-                            resource_path, resource_hash, existing_resource
-                        );
-                    }
-
-                    let client = Arc::clone(&client);
-                    let download_url = format!(
+                try_download(
+                    &client,
+                    &mut image_hashes,
+                    &mut image_set,
+                    &texture_location,
+                    &Arc::new(format!(
                         "{}{}/{}",
                         WARFRAME_CONTENT_URL,
                         PUBLIC_EXPORT_PATH,
                         &texture_location[1..]
-                    );
-                    let download_path = format!("{}/{}.png", STORAGE_FOLDERS[1], &cleaned_name);
-
-                    download_set.spawn(async move {
-                        download_file(&client, &download_url, &download_path, false)
-                            .await
-                            .unwrap()
-                    });
-
-                    image_hashes.insert(resource_path.to_string(), resource_hash.to_string());
-                }
+                    )),
+                    &Arc::new(format!(
+                        "{}/{}.png",
+                        STORAGE_FOLDERS[1],
+                        &unique_name.replace("/", ".")[1..]
+                    )),
+                    &Arc::new(false),
+                )
+                .await?;
             }
-            
+    
             // Wait for all downloads to finish...
-            download_set.join_all().await;
-
+            image_set.join_all().await;
+    
             let json = serde_json::to_string(&image_hashes)?;
             println!("Saved image hashes ➞ {}", IMAGE_HASH_LOCATION);
-            fs::write(IMAGE_HASH_LOCATION, json)?;
+            fs::write(IMAGE_HASH_LOCATION, json).await?;
         } else {
             println!("No changes found in export manifest!")
         }
@@ -144,72 +146,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn download_exports(
-    client: &Client,
-    export_indices: String,
-    unwrap_none: &String,
-) -> Result<(BTreeMap<String, String>, bool, bool), Box<dyn Error>> {
-    // Check for existing downloads
-    let mut export_hashes = restore_map(EXPORT_HASH_LOCATION)?;
-
-    // let re = Regex::new(r"(_en|\.json)").unwrap();
-    let mut updated_hash = false;
-    let mut updated_manifest = false;
-    let mut lines = export_indices.lines();
-    while let Some(line) = lines.next() {
-        // println!("{:#?}", line);
-        if let Some((resource_name, resource_hash)) = line.split_once("!") {
-            let existing_resource = export_hashes.get(resource_name).unwrap_or(&unwrap_none);
-
-            // Matching resource was found
-            if existing_resource == resource_hash {
-                continue;
-            }
-
-            updated_hash = true;
-            updated_manifest = resource_name == "ExportManifest.json";
-
-            // Got None, meaning a new resource.
-            if *existing_resource == *unwrap_none {
-                println!(
-                    "Added a new resource ➞ {} ({})",
-                    resource_name, resource_hash
-                );
-            } else {
-                // An updated resource was found.
-                println!(
-                    "Updated an existing resource ➞ {} ({} from {})",
-                    resource_name, resource_hash, existing_resource
-                );
-            }
-
-            download_file(
-                &client,
-                &format!("{}{}/{}", WARFRAME_CONTENT_URL, MANIFEST_PATH, line),
-                &format!("{}/{}", STORAGE_FOLDERS[2], resource_name),
-                true,
-            )
-            .await?;
-
-            export_hashes.insert(resource_name.to_string(), resource_hash.to_string());
-        }
-    }
-    Ok((export_hashes, updated_hash, updated_manifest))
-}
-
-fn restore_map(file_path: &str) -> Result<BTreeMap<String, String>, Box<dyn Error>> {
+async fn restore_map(file_path: &str) -> Result<BTreeMap<String, String>, Box<dyn Error>> {
     if Path::new(file_path).is_file() {
-        let existing_hashes = fs::read_to_string(file_path)?;
+        let existing_hashes = fs::read_to_string(file_path).await?;
         let map = serde_json::from_str(&existing_hashes)?;
         return Ok(map);
     }
     Ok(BTreeMap::new())
 }
 
-async fn fetch_export_indices(client: &Client) -> Result<String, Box<dyn Error>> {
+async fn fetch_export_index(client: &Client) -> Result<String, Box<dyn Error>> {
     let origin_url = env::var("WARFRAME_ORIGIN_URL").expect("Missing WARFRAME_ORIGIN_URL");
     let lzma_url = format!("{}{}", origin_url, LZMA_URL_PATH);
-    // println!("{}", &lzma_url);
 
     let response = client
         .get(Url::parse(&lzma_url)?)
@@ -231,24 +179,81 @@ async fn fetch_export_indices(client: &Client) -> Result<String, Box<dyn Error>>
     Ok(out.to_string())
 }
 
+/// try_download checks whether a resource should be downloaded, and downloads it.
+/// Returns (hash_updated, is_manifest)
+async fn try_download(
+    client: &Arc<Client>,
+    hashes: &mut BTreeMap<String, String>,
+    join_set: &mut JoinSet<()>,
+    resource: &String,
+    download_url: &Arc<String>,
+    download_path: &Arc<String>,
+    download_as_text: &Arc<bool>,
+) -> Result<(bool, bool), Box<dyn Error>> {
+    let unwrap_none = "None".to_string();
+
+    let Some((resource_name, resource_hash)) = resource.split_once("!") else {
+        panic!(
+            "Attempted to split a resource, but missing hash? ({})",
+            resource
+        )
+    };
+
+    let existing_resource = hashes.get(resource_name).unwrap_or(&unwrap_none);
+    let is_manifest = resource_name == "ExportManifest.json";
+
+    // Matching resource was found, caller should continue.
+    if existing_resource == resource_hash {
+        return Ok((false, is_manifest));
+    }
+
+    // Got None, meaning a new resource.
+    if *existing_resource == unwrap_none {
+        println!(
+            "Added a new resource ➞ {} ({})",
+            resource_name, resource_hash
+        );
+    } else {
+        // An updated resource was found.
+        println!(
+            "Updated an existing resource ➞ {} ({} from {})",
+            resource_name, resource_hash, existing_resource
+        );
+    }
+
+    let client = Arc::clone(client);
+    let download_url = Arc::clone(download_url);
+    let download_path = Arc::clone(download_path);
+    let download_as_bytes = Arc::clone(download_as_text);
+    join_set.spawn(async move {
+        download_file(&client, &download_url, &download_path, *download_as_bytes)
+            .await
+            .unwrap();
+    });
+
+    hashes.insert(resource_name.to_string(), resource_hash.to_string());
+
+    Ok((true, is_manifest))
+}
+
 async fn download_file(
     client: &Client,
     url: &str,
     save_path: &str,
-    is_manifest: bool,
+    as_text: bool,
 ) -> Result<(), Box<dyn Error>> {
     // println!("[DOWNLOAD] {}", url);
 
     let response = client.get(Url::parse(url)?).send().await?;
 
-    if is_manifest {
+    if as_text {
         let content = response.text().await?;
         let re = Regex::new(r"\\r|\r?\n").unwrap();
         let sanitized_content = re.replace_all(&content, "<NEW_LINE>").to_string();
-        fs::write(save_path, sanitized_content)?;
+        fs::write(save_path, sanitized_content).await?;
     } else {
         let content = response.bytes().await?;
-        fs::write(save_path, content)?;
+        fs::write(save_path, content).await?;
     }
 
     Ok(())
