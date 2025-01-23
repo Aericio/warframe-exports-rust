@@ -1,6 +1,8 @@
 use regex::Regex;
 use reqwest::Client;
 use reqwest::Url;
+use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
+use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::env;
@@ -47,7 +49,12 @@ struct ExportManifest {
 #[tokio::main(flavor = "multi_thread", worker_threads = 5)]
 async fn main() -> Result<(), Box<dyn Error>> {
     // An HTTP client to share between all requests.
-    let client = Arc::new(Client::new());
+    let retry_policy = ExponentialBackoff::builder().build_with_max_retries(3);
+    let client = Arc::new(
+        ClientBuilder::new(Client::new())
+            .with(RetryTransientMiddleware::new_with_policy(retry_policy))
+            .build(),
+    );
 
     // Create missing data folders.
     for folder in STORAGE_FOLDERS {
@@ -61,7 +68,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut updated_manifest = false;
 
     let mut export_set: JoinSet<()> = JoinSet::new();
-    let mut export_hashes = Arc::new(Mutex::new(load_hash_map_from_file(EXPORT_HASH_LOCATION).await?));
+    let mut export_hashes = Arc::new(Mutex::new(
+        load_hash_map_from_file(EXPORT_HASH_LOCATION).await?,
+    ));
 
     let export_index = download_export_index(&client).await?;
     let mut lines = export_index.lines();
@@ -104,8 +113,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         if updated_manifest {
             let mut image_set = JoinSet::new();
-            let mut image_hashes: Arc<Mutex<BTreeMap<String, String>>> =
-                Arc::new(Mutex::new(load_hash_map_from_file(IMAGE_HASH_LOCATION).await?));
+            let mut image_hashes: Arc<Mutex<BTreeMap<String, String>>> = Arc::new(Mutex::new(
+                load_hash_map_from_file(IMAGE_HASH_LOCATION).await?,
+            ));
 
             let export_manifest: ExportManifest = serde_json::from_str(
                 &fs::read_to_string(format!("{}/{}", STORAGE_FOLDERS[2], "ExportManifest.json"))
@@ -154,9 +164,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-
 /// Loads a hash map from a JSON file if it exists; otherwise, returns an empty map.
-/// 
+///
 /// # Arguments
 /// - `file_path`: Path to the JSON file containing the hash map.
 ///
@@ -165,7 +174,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
 ///
 /// # Errors
 /// - Returns an error if the file cannot be read or the JSON cannot be parsed.
-async fn load_hash_map_from_file(file_path: &str) -> Result<BTreeMap<String, String>, Box<dyn Error>> {
+async fn load_hash_map_from_file(
+    file_path: &str,
+) -> Result<BTreeMap<String, String>, Box<dyn Error>> {
     if Path::new(file_path).is_file() {
         let existing_hashes = fs::read_to_string(file_path).await?;
         let map = serde_json::from_str(&existing_hashes)?;
@@ -175,13 +186,13 @@ async fn load_hash_map_from_file(file_path: &str) -> Result<BTreeMap<String, Str
 }
 
 /// Downloads the export index and decompresses it using LZMA.
-/// 
+///
 /// # Arguments
 /// - `client`: A reference to the HTTP client used for making requests.
-/// 
+///
 /// # Returns
 /// A `Result` containing the decompressed export index as a `String`, or an error.
-async fn download_export_index(client: &Client) -> Result<String, Box<dyn Error>> {
+async fn download_export_index(client: &ClientWithMiddleware) -> Result<String, Box<dyn Error>> {
     let origin_url = env::var("WARFRAME_ORIGIN_URL").expect("Missing WARFRAME_ORIGIN_URL");
     let lzma_url = format!("{}{}", origin_url, LZMA_URL_PATH);
 
@@ -206,7 +217,7 @@ async fn download_export_index(client: &Client) -> Result<String, Box<dyn Error>
 }
 
 /// Checks if a resource should be downloaded by comparing its hash and initiates the download if necessary.
-/// 
+///
 /// # Arguments
 /// - `client`: Shared HTTP client for making requests.
 /// - `hashes`: A shared, thread-safe hash map containing resource hashes.
@@ -222,7 +233,7 @@ async fn download_export_index(client: &Client) -> Result<String, Box<dyn Error>
 /// # Errors
 /// - Returns an error if the resource parsing fails or if there are issues during task creation.
 async fn check_and_download_resource(
-    client: &Arc<Client>,
+    client: &Arc<ClientWithMiddleware>,
     hashes: &Arc<Mutex<BTreeMap<String, String>>>,
     join_set: &mut JoinSet<()>,
     resource: &String,
@@ -289,7 +300,7 @@ async fn check_and_download_resource(
 
 /// Downloads a file from a given URL and saves it to a specified path.
 /// Optionally processes the content as text by sanitizing newlines.
-/// 
+///
 /// # Arguments
 /// - `client`: HTTP client for making the request.
 /// - `url`: URL of the file to download.
@@ -302,7 +313,7 @@ async fn check_and_download_resource(
 /// # Errors
 /// - Returns an error if the request, content processing, or file writing fails.
 async fn download_file(
-    client: &Client,
+    client: &ClientWithMiddleware,
     url: &str,
     save_path: &str,
     as_text: bool,
