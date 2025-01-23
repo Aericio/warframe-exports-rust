@@ -9,6 +9,7 @@ use std::io::{BufReader, Cursor};
 use std::path::Path;
 use std::string::ToString;
 use std::sync::Arc;
+use std::sync::LazyLock;
 use tokio::fs;
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
@@ -26,6 +27,9 @@ static WARFRAME_CONTENT_URL: &'static str = "https://content.warframe.com";
 static LZMA_URL_PATH: &'static str = "/PublicExport/index_en.txt.lzma";
 static MANIFEST_PATH: &'static str = "/PublicExport/Manifest";
 static PUBLIC_EXPORT_PATH: &'static str = "/PublicExport";
+
+static RE_NEWLINE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\\r|\r?\n").unwrap());
+static UNWRAP_NONE: LazyLock<String> = LazyLock::new(|| String::from("None"));
 
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -57,12 +61,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut updated_manifest = false;
 
     let mut export_set: JoinSet<()> = JoinSet::new();
-    let mut export_hashes = Arc::new(Mutex::new(restore_map(EXPORT_HASH_LOCATION).await?));
+    let mut export_hashes = Arc::new(Mutex::new(load_hash_map_from_file(EXPORT_HASH_LOCATION).await?));
 
-    let export_index = fetch_export_index(&client).await?;
+    let export_index = download_export_index(&client).await?;
     let mut lines = export_index.lines();
     while let Some(line) = lines.next() {
-        let (hash, manifest) = try_download(
+        let (hash, manifest) = check_and_download_resource(
             &client,
             &mut export_hashes,
             &mut export_set,
@@ -101,7 +105,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         if updated_manifest {
             let mut image_set = JoinSet::new();
             let mut image_hashes: Arc<Mutex<BTreeMap<String, String>>> =
-                Arc::new(Mutex::new(restore_map(IMAGE_HASH_LOCATION).await?));
+                Arc::new(Mutex::new(load_hash_map_from_file(IMAGE_HASH_LOCATION).await?));
 
             let export_manifest: ExportManifest = serde_json::from_str(
                 &fs::read_to_string(format!("{}/{}", STORAGE_FOLDERS[2], "ExportManifest.json"))
@@ -113,7 +117,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 unique_name,
             } in export_manifest.Manifest
             {
-                try_download(
+                check_and_download_resource(
                     &client,
                     &mut image_hashes,
                     &mut image_set,
@@ -150,7 +154,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn restore_map(file_path: &str) -> Result<BTreeMap<String, String>, Box<dyn Error>> {
+
+/// Loads a hash map from a JSON file if it exists; otherwise, returns an empty map.
+/// 
+/// # Arguments
+/// - `file_path`: Path to the JSON file containing the hash map.
+///
+/// # Returns
+/// - A `BTreeMap` containing the key-value pairs from the JSON file, or an empty map if the file doesn't exist.
+///
+/// # Errors
+/// - Returns an error if the file cannot be read or the JSON cannot be parsed.
+async fn load_hash_map_from_file(file_path: &str) -> Result<BTreeMap<String, String>, Box<dyn Error>> {
     if Path::new(file_path).is_file() {
         let existing_hashes = fs::read_to_string(file_path).await?;
         let map = serde_json::from_str(&existing_hashes)?;
@@ -159,7 +174,14 @@ async fn restore_map(file_path: &str) -> Result<BTreeMap<String, String>, Box<dy
     Ok(BTreeMap::new())
 }
 
-async fn fetch_export_index(client: &Client) -> Result<String, Box<dyn Error>> {
+/// Downloads the export index and decompresses it using LZMA.
+/// 
+/// # Arguments
+/// - `client`: A reference to the HTTP client used for making requests.
+/// 
+/// # Returns
+/// A `Result` containing the decompressed export index as a `String`, or an error.
+async fn download_export_index(client: &Client) -> Result<String, Box<dyn Error>> {
     let origin_url = env::var("WARFRAME_ORIGIN_URL").expect("Missing WARFRAME_ORIGIN_URL");
     let lzma_url = format!("{}{}", origin_url, LZMA_URL_PATH);
 
@@ -183,9 +205,23 @@ async fn fetch_export_index(client: &Client) -> Result<String, Box<dyn Error>> {
     Ok(out.to_string())
 }
 
-/// try_download checks whether a resource should be downloaded, and downloads it.
-/// Returns (hash_updated, is_manifest)
-async fn try_download(
+/// Checks if a resource should be downloaded by comparing its hash and initiates the download if necessary.
+/// 
+/// # Arguments
+/// - `client`: Shared HTTP client for making requests.
+/// - `hashes`: A shared, thread-safe hash map containing resource hashes.
+/// - `join_set`: A set of asynchronous tasks for parallel downloads.
+/// - `resource`: Resource descriptor string containing the name and hash.
+/// - `download_url`: URL to download the resource from.
+/// - `download_path`: Path to save the downloaded file.
+/// - `download_as_text`: Flag indicating if the resource should be saved as text (otherwise bytes).
+///
+/// # Returns
+/// - A tuple `(hash_updated, is_manifest)` indicating if the hash was updated and if the resource is a manifest.
+///
+/// # Errors
+/// - Returns an error if the resource parsing fails or if there are issues during task creation.
+async fn check_and_download_resource(
     client: &Arc<Client>,
     hashes: &Arc<Mutex<BTreeMap<String, String>>>,
     join_set: &mut JoinSet<()>,
@@ -194,8 +230,6 @@ async fn try_download(
     download_path: Arc<String>,
     download_as_text: Arc<bool>,
 ) -> Result<(bool, bool), Box<dyn Error>> {
-    let unwrap_none = "None".to_string();
-
     let Some((resource_name, resource_hash)) = resource.split_once("!") else {
         panic!(
             "Attempted to split a resource, but missing hash? ({})",
@@ -204,7 +238,7 @@ async fn try_download(
     };
 
     let hash_lock = hashes.lock().await;
-    let existing_resource = hash_lock.get(resource_name).unwrap_or(&unwrap_none);
+    let existing_resource = hash_lock.get(resource_name).unwrap_or(&UNWRAP_NONE);
     let is_manifest = resource_name == "ExportManifest.json";
 
     // Matching resource was found, caller should continue.
@@ -213,7 +247,7 @@ async fn try_download(
     }
 
     // Got None, meaning a new resource.
-    if *existing_resource == unwrap_none {
+    if *existing_resource == *UNWRAP_NONE {
         println!(
             "Added a new resource ➞ {} ({})",
             resource_name, resource_hash
@@ -253,6 +287,20 @@ async fn try_download(
     Ok((true, is_manifest))
 }
 
+/// Downloads a file from a given URL and saves it to a specified path.
+/// Optionally processes the content as text by sanitizing newlines.
+/// 
+/// # Arguments
+/// - `client`: HTTP client for making the request.
+/// - `url`: URL of the file to download.
+/// - `save_path`: Path where the file will be saved.
+/// - `as_text`: Flag indicating if the content should be saved as sanitized text.
+///
+/// # Returns
+/// - `Ok(())` if the file is downloaded and saved successfully.
+///
+/// # Errors
+/// - Returns an error if the request, content processing, or file writing fails.
 async fn download_file(
     client: &Client,
     url: &str,
@@ -265,8 +313,7 @@ async fn download_file(
 
     if as_text {
         let content = response.text().await?;
-        let re = Regex::new(r"\\r|\r?\n").unwrap();
-        let sanitized_content = re.replace_all(&content, "<NEW_LINE>").to_string();
+        let sanitized_content = RE_NEWLINE.replace_all(&content, "<NEW_LINE>").to_string();
         fs::write(save_path, sanitized_content).await?;
     } else {
         let content = response.bytes().await?;
