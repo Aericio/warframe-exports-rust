@@ -25,6 +25,7 @@ static STORAGE_FOLDERS: [&'static str; 3] = ["./output", "./output/image", "./ou
 static EXPORT_HASH_LOCATION: &'static str = "./output/export_hash.json";
 static IMAGE_HASH_LOCATION: &'static str = "./output/image_hash.json";
 
+static WARFRAME_ORIGIN_URL: &'static str = "https://origin.warframe.com";
 static WARFRAME_CONTENT_URL: &'static str = "https://content.warframe.com";
 static LZMA_URL_PATH: &'static str = "/PublicExport/index_en.txt.lzma";
 static MANIFEST_PATH: &'static str = "/PublicExport/Manifest";
@@ -193,14 +194,14 @@ async fn load_hash_map_from_file(
 /// # Returns
 /// A `Result` containing the decompressed export index as a `String`, or an error.
 async fn download_export_index(client: &ClientWithMiddleware) -> Result<String, Box<dyn Error>> {
-    let origin_url = env::var("WARFRAME_ORIGIN_URL").expect("Missing WARFRAME_ORIGIN_URL");
+    let origin_url = env::var("WARFRAME_ORIGIN_URL").unwrap_or(WARFRAME_ORIGIN_URL.to_string());
     let lzma_url = format!("{}{}", origin_url, LZMA_URL_PATH);
 
     let response = client
         .get(Url::parse(&lzma_url)?)
         .header(
             "Authentication",
-            env::var("PROXY_AUTH_TOKEN").expect("Missing PROXY_AUTH_TOKEN"),
+            env::var("PROXY_AUTH_TOKEN").unwrap_or_default(),
         )
         .send()
         .await?;
