@@ -10,6 +10,7 @@ use std::path::Path;
 use std::string::ToString;
 use std::sync::Arc;
 use tokio::fs;
+use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 
 /// Environment Variables
@@ -56,7 +57,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut updated_manifest = false;
 
     let mut export_set: JoinSet<()> = JoinSet::new();
-    let mut export_hashes = restore_map(EXPORT_HASH_LOCATION).await?;
+    let mut export_hashes = Arc::new(Mutex::new(restore_map(EXPORT_HASH_LOCATION).await?));
 
     let export_index = fetch_export_index(&client).await?;
     let mut lines = export_index.lines();
@@ -66,14 +67,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
             &mut export_hashes,
             &mut export_set,
             &line.to_string(),
-            &Arc::new(format!(
+            Arc::new(format!(
                 "{}{}/{}",
-                WARFRAME_CONTENT_URL,
-                MANIFEST_PATH,
-                line
+                WARFRAME_CONTENT_URL, MANIFEST_PATH, line
             )),
-            &Arc::new(format!("{}/{}", STORAGE_FOLDERS[2], &line[..(line.len() - 26)])),
-            &Arc::new(true),
+            Arc::new(format!(
+                "{}/{}",
+                STORAGE_FOLDERS[2],
+                &line[..(line.len() - 26)]
+            )),
+            Arc::new(true),
         )
         .await?;
 
@@ -91,13 +94,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     export_set.join_all().await;
 
     if updated_hash {
-        let json = serde_json::to_string(&export_hashes)?;
+        let json = serde_json::to_string(&*export_hashes.lock().await)?;
         println!("Saved export hashes ➞ {}", EXPORT_HASH_LOCATION);
         fs::write(EXPORT_HASH_LOCATION, json).await?;
 
         if updated_manifest {
             let mut image_set = JoinSet::new();
-            let mut image_hashes = restore_map(IMAGE_HASH_LOCATION).await?;
+            let mut image_hashes: Arc<Mutex<BTreeMap<String, String>>> =
+                Arc::new(Mutex::new(restore_map(IMAGE_HASH_LOCATION).await?));
 
             let export_manifest: ExportManifest = serde_json::from_str(
                 &fs::read_to_string(format!("{}/{}", STORAGE_FOLDERS[2], "ExportManifest.json"))
@@ -114,18 +118,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     &mut image_hashes,
                     &mut image_set,
                     &texture_location,
-                    &Arc::new(format!(
+                    Arc::new(format!(
                         "{}{}/{}",
                         WARFRAME_CONTENT_URL,
                         PUBLIC_EXPORT_PATH,
                         &texture_location[1..]
                     )),
-                    &Arc::new(format!(
+                    Arc::new(format!(
                         "{}/{}.png",
                         STORAGE_FOLDERS[1],
                         &unique_name.replace("/", ".")[1..]
                     )),
-                    &Arc::new(false),
+                    Arc::new(false),
                 )
                 .await?;
             }
@@ -133,7 +137,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             // Wait for all downloads to finish...
             image_set.join_all().await;
 
-            let json = serde_json::to_string(&image_hashes)?;
+            let json = serde_json::to_string(&*image_hashes.lock().await)?;
             println!("Saved image hashes ➞ {}", IMAGE_HASH_LOCATION);
             fs::write(IMAGE_HASH_LOCATION, json).await?;
         } else {
@@ -183,12 +187,12 @@ async fn fetch_export_index(client: &Client) -> Result<String, Box<dyn Error>> {
 /// Returns (hash_updated, is_manifest)
 async fn try_download(
     client: &Arc<Client>,
-    hashes: &mut BTreeMap<String, String>,
+    hashes: &Arc<Mutex<BTreeMap<String, String>>>,
     join_set: &mut JoinSet<()>,
     resource: &String,
-    download_url: &Arc<String>,
-    download_path: &Arc<String>,
-    download_as_text: &Arc<bool>,
+    download_url: Arc<String>,
+    download_path: Arc<String>,
+    download_as_text: Arc<bool>,
 ) -> Result<(bool, bool), Box<dyn Error>> {
     let unwrap_none = "None".to_string();
 
@@ -199,7 +203,8 @@ async fn try_download(
         )
     };
 
-    let existing_resource = hashes.get(resource_name).unwrap_or(&unwrap_none);
+    let hash_lock = hashes.lock().await;
+    let existing_resource = hash_lock.get(resource_name).unwrap_or(&unwrap_none);
     let is_manifest = resource_name == "ExportManifest.json";
 
     // Matching resource was found, caller should continue.
@@ -221,17 +226,29 @@ async fn try_download(
         );
     }
 
-    let client = Arc::clone(client);
-    let download_url = Arc::clone(download_url);
-    let download_path = Arc::clone(download_path);
-    let download_as_text = Arc::clone(download_as_text);
-    join_set.spawn(async move {
-        download_file(&client, &download_url, &download_path, *download_as_text)
-            .await
-            .unwrap();
-    });
+    // Frees the lock on hashes
+    drop(hash_lock);
 
-    hashes.insert(resource_name.to_string(), resource_hash.to_string());
+    let client = Arc::clone(client);
+    let hashes = Arc::clone(hashes);
+    let resource_name = resource_name.to_owned();
+    let resource_hash = resource_hash.to_owned();
+    let download_url = Arc::clone(&download_url);
+    let download_path = Arc::clone(&download_path);
+    let download_as_text = Arc::clone(&download_as_text);
+    join_set.spawn(async move {
+        let result = download_file(&client, &download_url, &download_path, *download_as_text).await;
+        match result.map_err(|e| e.to_string()) {
+            Ok(..) => {
+                hashes.lock().await.insert(resource_name, resource_hash);
+                ()
+            }
+            Err(err) => println!(
+                "An issue occured while downloading {} ({}): {}",
+                resource_name, resource_hash, err
+            ),
+        }
+    });
 
     Ok((true, is_manifest))
 }
