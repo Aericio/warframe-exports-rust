@@ -47,7 +47,17 @@ struct ExportManifest {
     Manifest: Vec<ExportManifestItem>,
 }
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 5)]
+/// Configuration for downloading a file.
+/// - `url`: The URL of the file to be downloaded.
+/// - `path`: The local file path where the downloaded content will be saved.
+/// - `as_text`: Whether content should be saved as text or as bytes.
+struct DownloadConfig {
+    url: String,
+    path: String,
+    as_text: bool,
+}
+
+#[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
     // An HTTP client to share between all requests.
     let retry_policy = ExponentialBackoff::builder().build_with_max_retries(3);
@@ -81,16 +91,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             &mut export_hashes,
             &mut export_set,
             &line.to_string(),
-            Arc::new(format!(
-                "{}{}/{}",
-                WARFRAME_CONTENT_URL, MANIFEST_PATH, line
-            )),
-            Arc::new(format!(
-                "{}/{}",
-                STORAGE_FOLDERS[2],
-                &line[..(line.len() - 26)]
-            )),
-            Arc::new(true),
+            Arc::new(DownloadConfig {
+                url: format!("{}{}/{}", WARFRAME_CONTENT_URL, MANIFEST_PATH, line),
+                path: format!("{}/{}", STORAGE_FOLDERS[2], &line[..(line.len() - 26)]),
+                as_text: true,
+            }),
         )
         .await?;
 
@@ -133,18 +138,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     &mut image_hashes,
                     &mut image_set,
                     &texture_location,
-                    Arc::new(format!(
-                        "{}{}/{}",
-                        WARFRAME_CONTENT_URL,
-                        PUBLIC_EXPORT_PATH,
-                        &texture_location[1..]
-                    )),
-                    Arc::new(format!(
-                        "{}/{}.png",
-                        STORAGE_FOLDERS[1],
-                        &unique_name.replace("/", ".")[1..]
-                    )),
-                    Arc::new(false),
+                    Arc::new(DownloadConfig {
+                        url: format!(
+                            "{}{}/{}",
+                            WARFRAME_CONTENT_URL,
+                            PUBLIC_EXPORT_PATH,
+                            &texture_location[1..]
+                        ),
+                        path: format!(
+                            "{}/{}.png",
+                            STORAGE_FOLDERS[1],
+                            &unique_name.replace("/", ".")[1..]
+                        ),
+                        as_text: false,
+                    }),
                 )
                 .await?;
             }
@@ -172,9 +179,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 ///
 /// # Returns
 /// - A `BTreeMap` containing the key-value pairs from the JSON file, or an empty map if the file doesn't exist.
-///
-/// # Errors
-/// - Returns an error if the file cannot be read or the JSON cannot be parsed.
 async fn load_hash_map_from_file(
     file_path: &str,
 ) -> Result<BTreeMap<String, String>, Box<dyn Error>> {
@@ -221,26 +225,19 @@ async fn download_export_index(client: &ClientWithMiddleware) -> Result<String, 
 ///
 /// # Arguments
 /// - `client`: Shared HTTP client for making requests.
-/// - `hashes`: A shared, thread-safe hash map containing resource hashes.
+/// - `hashes`: Shared hash map containing resource hashes.
 /// - `join_set`: A set of asynchronous tasks for parallel downloads.
 /// - `resource`: Resource descriptor string containing the name and hash.
-/// - `download_url`: URL to download the resource from.
-/// - `download_path`: Path to save the downloaded file.
-/// - `download_as_text`: Flag indicating if the resource should be saved as text (otherwise bytes).
+/// - `download_config`: Struct that specifies the download configuration.
 ///
 /// # Returns
 /// - A tuple `(hash_updated, is_manifest)` indicating if the hash was updated and if the resource is a manifest.
-///
-/// # Errors
-/// - Returns an error if the resource parsing fails or if there are issues during task creation.
 async fn check_and_download_resource(
     client: &Arc<ClientWithMiddleware>,
     hashes: &Arc<Mutex<BTreeMap<String, String>>>,
     join_set: &mut JoinSet<()>,
     resource: &String,
-    download_url: Arc<String>,
-    download_path: Arc<String>,
-    download_as_text: Arc<bool>,
+    download_config: Arc<DownloadConfig>,
 ) -> Result<(bool, bool), Box<dyn Error>> {
     let Some((resource_name, resource_hash)) = resource.split_once("!") else {
         panic!(
@@ -279,11 +276,9 @@ async fn check_and_download_resource(
     let hashes = Arc::clone(hashes);
     let resource_name = resource_name.to_owned();
     let resource_hash = resource_hash.to_owned();
-    let download_url = Arc::clone(&download_url);
-    let download_path = Arc::clone(&download_path);
-    let download_as_text = Arc::clone(&download_as_text);
+    let download_config = Arc::clone(&download_config);
     join_set.spawn(async move {
-        let result = download_file(&client, &download_url, &download_path, *download_as_text).await;
+        let result = download_file(&client, download_config).await;
         match result.map_err(|e| e.to_string()) {
             Ok(..) => {
                 hashes.lock().await.insert(resource_name, resource_hash);
@@ -304,32 +299,25 @@ async fn check_and_download_resource(
 ///
 /// # Arguments
 /// - `client`: HTTP client for making the request.
-/// - `url`: URL of the file to download.
-/// - `save_path`: Path where the file will be saved.
-/// - `as_text`: Flag indicating if the content should be saved as sanitized text.
+/// - `download_config`: Struct that specifies the download configuration.
 ///
 /// # Returns
 /// - `Ok(())` if the file is downloaded and saved successfully.
-///
-/// # Errors
-/// - Returns an error if the request, content processing, or file writing fails.
 async fn download_file(
     client: &ClientWithMiddleware,
-    url: &str,
-    save_path: &str,
-    as_text: bool,
+    download_config: Arc<DownloadConfig>,
 ) -> Result<(), Box<dyn Error>> {
     // println!("[DOWNLOAD] {}", url);
 
-    let response = client.get(Url::parse(url)?).send().await?;
+    let response = client.get(Url::parse(&download_config.url)?).send().await?;
 
-    if as_text {
+    if download_config.as_text {
         let content = response.text().await?;
         let sanitized_content = RE_NEWLINE.replace_all(&content, "<NEW_LINE>").to_string();
-        fs::write(save_path, sanitized_content).await?;
+        fs::write(&download_config.path, sanitized_content).await?;
     } else {
         let content = response.bytes().await?;
-        fs::write(save_path, content).await?;
+        fs::write(&download_config.path, content).await?;
     }
 
     Ok(())
