@@ -1,6 +1,10 @@
 # warframe-exports
 
-This project is a Rust-based tool for downloading Warframe public export data, like manifests and images, from the Warframe content servers.
+This is a Rust-based tool for downloading Warframe public export data, like manifests and images, from the Warframe content server.
+
+All exported content is provided as-is, if possible, from the content server. Modifications are listed below:
+- `Export*.json` files contain text that include control characters (`\r`, `\n`), and are escaped during pre-processing.
+- All images are flattened to the `/image` directory, and use their `unique_name` as the file name with `/` replaced with `.`.
 
 ## Outputs
 

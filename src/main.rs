@@ -1,4 +1,4 @@
-use regex::Regex;
+use regex::{Captures, Regex};
 use reqwest::Client;
 use reqwest::Url;
 use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
@@ -31,7 +31,7 @@ static LZMA_URL_PATH: &'static str = "/PublicExport/index_en.txt.lzma";
 static MANIFEST_PATH: &'static str = "/PublicExport/Manifest";
 static PUBLIC_EXPORT_PATH: &'static str = "/PublicExport";
 
-static RE_NEWLINE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\\r|\r?\n").unwrap());
+static RE_ESCAPES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[\r\n]").unwrap());
 static UNWRAP_NONE: LazyLock<String> = LazyLock::new(|| String::from("None"));
 
 #[derive(Deserialize, Debug)]
@@ -285,7 +285,7 @@ async fn check_and_download_resource(
                 ()
             }
             Err(err) => println!(
-                "An issue occured while downloading {} ({}): {}",
+                "An issue occurred while downloading {} ({}): {}",
                 resource_name, resource_hash, err
             ),
         }
@@ -307,18 +307,26 @@ async fn download_file(
     client: &ClientWithMiddleware,
     download_config: Arc<DownloadConfig>,
 ) -> Result<(), Box<dyn Error>> {
-    // println!("[DOWNLOAD] {}", url);
+    // println!("[DOWNLOAD] {}", download_config.url);
 
     let response = client.get(Url::parse(&download_config.url)?).send().await?;
 
     if download_config.as_text {
         let content = response.text().await?;
-        let sanitized_content = RE_NEWLINE.replace_all(&content, "<NEW_LINE>").to_string();
-        fs::write(&download_config.path, sanitized_content).await?;
+        let sanitized = RE_ESCAPES.replace_all(&content, escape_match).to_string();
+        fs::write(&download_config.path, sanitized).await?;
     } else {
         let content = response.bytes().await?;
         fs::write(&download_config.path, content).await?;
     }
 
     Ok(())
+}
+
+fn escape_match(captures: &Captures) -> &'static str {
+    match &captures[0] {
+        "\r" => "\\r",
+        "\n" => "\\n",
+        _ => unreachable!(), // shouldn't happen
+    }
 }
