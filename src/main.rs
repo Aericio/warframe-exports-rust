@@ -1,9 +1,7 @@
-use regex::{Captures, Regex};
 use reqwest::Client;
 use reqwest::Url;
 use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
 use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
-use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::env;
 use std::error::Error;
@@ -11,42 +9,31 @@ use std::io::{BufReader, Cursor};
 use std::path::Path;
 use std::string::ToString;
 use std::sync::Arc;
-use std::sync::LazyLock;
 use tokio::fs;
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 
-static WARFRAME_ORIGIN_URL: &'static str = "https://origin.warframe.com";
-static WARFRAME_CONTENT_URL: &'static str = "https://content.warframe.com";
-static LZMA_URL_PATH: &'static str = "/PublicExport/index_en.txt.lzma";
-static MANIFEST_PATH: &'static str = "/PublicExport/Manifest";
-static PUBLIC_EXPORT_PATH: &'static str = "/PublicExport";
+use warframe_exports::{
+    // Functions
+    escape_match,
+    load_hash_map_from_file,
+    split_string_to_resource,
 
-static RE_ESCAPES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[\r\n]").unwrap());
-static UNWRAP_NONE: LazyLock<String> = LazyLock::new(|| String::from("None"));
+    // Structs
+    DownloadConfig,
+    ExportManifest,
+    ExportManifestItem,
+    Resource,
 
-#[derive(Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-struct ExportManifestItem {
-    texture_location: String,
-    unique_name: String,
-}
-
-#[allow(non_snake_case)]
-#[derive(Deserialize, Debug)]
-struct ExportManifest {
-    Manifest: Vec<ExportManifestItem>,
-}
-
-/// Configuration for downloading a file.
-/// - `url`: The URL of the file to be downloaded.
-/// - `path`: The local file path where the downloaded content will be saved.
-/// - `as_text`: Whether content should be saved as text or as bytes.
-struct DownloadConfig {
-    url: String,
-    path: String,
-    as_text: bool,
-}
+    // Constants
+    LZMA_URL_PATH,
+    MANIFEST_PATH,
+    PUBLIC_EXPORT_PATH,
+    RE_ESCAPES,
+    UNWRAP_NONE,
+    WARFRAME_CONTENT_URL,
+    WARFRAME_ORIGIN_URL,
+};
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -93,7 +80,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             &client,
             &mut export_hashes,
             &mut export_set,
-            &line.to_string(),
+            Arc::new(split_string_to_resource(&line.to_string())?),
             Arc::new(DownloadConfig {
                 url: format!("{}{}/{}", WARFRAME_CONTENT_URL, MANIFEST_PATH, line),
                 path: format!("{}/{}", &storage_folders[2], &line[..(line.len() - 26)]),
@@ -136,17 +123,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 unique_name,
             } in export_manifest.Manifest
             {
+                let resource = split_string_to_resource(&texture_location)?;
+
                 check_and_download_resource(
                     &client,
                     &mut image_hashes,
                     &mut image_set,
-                    &texture_location,
+                    Arc::new(Resource {
+                        name: unique_name.clone(),
+                        hash: resource.hash,
+                    }),
                     Arc::new(DownloadConfig {
                         url: format!(
-                            "{}{}/{}",
+                            "{}{}{}",
                             WARFRAME_CONTENT_URL,
                             PUBLIC_EXPORT_PATH,
-                            &texture_location[1..]
+                            &texture_location
                         ),
                         path: format!(
                             "{}/{}.png",
@@ -173,24 +165,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
-}
-
-/// Loads a hash map from a JSON file if it exists; otherwise, returns an empty map.
-///
-/// # Arguments
-/// - `file_path`: Path to the JSON file containing the hash map.
-///
-/// # Returns
-/// - A `BTreeMap` containing the key-value pairs from the JSON file, or an empty map if the file doesn't exist.
-async fn load_hash_map_from_file(
-    file_path: &str,
-) -> Result<BTreeMap<String, String>, Box<dyn Error>> {
-    if Path::new(file_path).is_file() {
-        let existing_hashes = fs::read_to_string(file_path).await?;
-        let map = serde_json::from_str(&existing_hashes)?;
-        return Ok(map);
-    }
-    Ok(BTreeMap::new())
 }
 
 /// Downloads the export index and decompresses it using LZMA.
@@ -239,22 +213,15 @@ async fn check_and_download_resource(
     client: &Arc<ClientWithMiddleware>,
     hashes: &Arc<Mutex<BTreeMap<String, String>>>,
     join_set: &mut JoinSet<()>,
-    resource: &String,
+    resource: Arc<Resource>,
     download_config: Arc<DownloadConfig>,
 ) -> Result<(bool, bool), Box<dyn Error>> {
-    let Some((resource_name, resource_hash)) = resource.split_once("!") else {
-        panic!(
-            "Attempted to split a resource, but missing hash? ({})",
-            resource
-        )
-    };
-
     let hash_lock = hashes.lock().await;
-    let existing_resource = hash_lock.get(resource_name).unwrap_or(&UNWRAP_NONE);
-    let is_manifest = resource_name == "ExportManifest.json";
+    let existing_resource = hash_lock.get(&resource.name).unwrap_or(&UNWRAP_NONE);
+    let is_manifest = resource.name == "ExportManifest.json";
 
     // Matching resource was found, caller should continue.
-    if existing_resource == resource_hash {
+    if *existing_resource == resource.hash {
         return Ok((false, is_manifest));
     }
 
@@ -262,13 +229,13 @@ async fn check_and_download_resource(
     if *existing_resource == *UNWRAP_NONE {
         println!(
             "Added a new resource ➞ {} ({})",
-            resource_name, resource_hash
+            resource.name, resource.hash
         );
     } else {
         // An updated resource was found.
         println!(
             "Updated an existing resource ➞ {} ({} from {})",
-            resource_name, resource_hash, existing_resource
+            resource.name, resource.hash, existing_resource
         );
     }
 
@@ -277,19 +244,20 @@ async fn check_and_download_resource(
 
     let client = Arc::clone(client);
     let hashes = Arc::clone(hashes);
-    let resource_name = resource_name.to_owned();
-    let resource_hash = resource_hash.to_owned();
     let download_config = Arc::clone(&download_config);
     join_set.spawn(async move {
         let result = download_file(&client, download_config).await;
         match result.map_err(|e| e.to_string()) {
             Ok(..) => {
-                hashes.lock().await.insert(resource_name, resource_hash);
+                hashes
+                    .lock()
+                    .await
+                    .insert(resource.name.to_owned(), resource.hash.to_owned());
                 ()
             }
             Err(err) => println!(
                 "An issue occurred while downloading {} ({}): {}",
-                resource_name, resource_hash, err
+                resource.name, resource.hash, err
             ),
         }
     });
@@ -324,12 +292,4 @@ async fn download_file(
     }
 
     Ok(())
-}
-
-fn escape_match(captures: &Captures) -> &'static str {
-    match &captures[0] {
-        "\r" => "\\r",
-        "\n" => "\\n",
-        _ => unreachable!(), // shouldn't happen
-    }
 }
