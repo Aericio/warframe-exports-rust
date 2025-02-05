@@ -16,15 +16,6 @@ use tokio::fs;
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 
-/// Environment Variables
-/// WARFRAME_ORIGIN_URL - No trailing slash!
-/// PROXY_AUTH_TOKEN
-
-static STORAGE_FOLDERS: [&'static str; 3] = ["./output", "./output/image", "./output/export"];
-
-static EXPORT_HASH_LOCATION: &'static str = "./output/export_hash.json";
-static IMAGE_HASH_LOCATION: &'static str = "./output/image_hash.json";
-
 static WARFRAME_ORIGIN_URL: &'static str = "https://origin.warframe.com";
 static WARFRAME_CONTENT_URL: &'static str = "https://content.warframe.com";
 static LZMA_URL_PATH: &'static str = "/PublicExport/index_en.txt.lzma";
@@ -67,8 +58,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .build(),
     );
 
+    // Create output directory.
+    let output_dir = env::var("OUTPUT_DIRECTORY").unwrap_or("./output".to_string());
+
+    let storage_folders = [
+        format!("{}/", output_dir),
+        format!("{}/image", output_dir),
+        format!("{}/export", output_dir),
+    ];
+
+    let export_hash_location = format!("{}/export_hash.json", output_dir);
+    let image_hash_location = format!("{}/image_hash.json", output_dir);
+
     // Create missing data folders.
-    for folder in STORAGE_FOLDERS {
+    for folder in &storage_folders {
         if Path::new(folder).is_dir() == false {
             println!("{} directory not found, initializing...", folder);
             fs::create_dir(folder).await?;
@@ -80,7 +83,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let mut export_set: JoinSet<()> = JoinSet::new();
     let mut export_hashes = Arc::new(Mutex::new(
-        load_hash_map_from_file(EXPORT_HASH_LOCATION).await?,
+        load_hash_map_from_file(&export_hash_location).await?,
     ));
 
     let export_index = download_export_index(&client).await?;
@@ -93,7 +96,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             &line.to_string(),
             Arc::new(DownloadConfig {
                 url: format!("{}{}/{}", WARFRAME_CONTENT_URL, MANIFEST_PATH, line),
-                path: format!("{}/{}", STORAGE_FOLDERS[2], &line[..(line.len() - 26)]),
+                path: format!("{}/{}", &storage_folders[2], &line[..(line.len() - 26)]),
                 as_text: true,
             }),
         )
@@ -114,17 +117,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     if updated_hash {
         let json = serde_json::to_string(&*export_hashes.lock().await)?;
-        println!("Saved export hashes ➞ {}", EXPORT_HASH_LOCATION);
-        fs::write(EXPORT_HASH_LOCATION, json).await?;
+        println!("Saved export hashes ➞ {}", export_hash_location);
+        fs::write(&export_hash_location, json).await?;
 
         if updated_manifest {
             let mut image_set = JoinSet::new();
             let mut image_hashes: Arc<Mutex<BTreeMap<String, String>>> = Arc::new(Mutex::new(
-                load_hash_map_from_file(IMAGE_HASH_LOCATION).await?,
+                load_hash_map_from_file(&image_hash_location).await?,
             ));
 
             let export_manifest: ExportManifest = serde_json::from_str(
-                &fs::read_to_string(format!("{}/{}", STORAGE_FOLDERS[2], "ExportManifest.json"))
+                &fs::read_to_string(format!("{}/{}", &storage_folders[2], "ExportManifest.json"))
                     .await?,
             )?;
 
@@ -147,7 +150,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         ),
                         path: format!(
                             "{}/{}.png",
-                            STORAGE_FOLDERS[1],
+                            &storage_folders[1],
                             &unique_name.replace("/", ".")[1..]
                         ),
                         as_text: false,
@@ -160,8 +163,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             image_set.join_all().await;
 
             let json = serde_json::to_string(&*image_hashes.lock().await)?;
-            println!("Saved image hashes ➞ {}", IMAGE_HASH_LOCATION);
-            fs::write(IMAGE_HASH_LOCATION, json).await?;
+            println!("Saved image hashes ➞ {}", &image_hash_location);
+            fs::write(&image_hash_location, json).await?;
         } else {
             println!("No changes found in export manifest!")
         }
