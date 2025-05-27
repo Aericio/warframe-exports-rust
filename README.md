@@ -9,7 +9,7 @@ All exported content is provided as-is, if possible, from the content server. Mo
   - Images in the root `/image` directory are rescaled to 512x512, if needed, for consistency; some images were originally smaller (e.g. `128x128`) or larger (e.g. `2048x2048`).
   - Scaling is performed using Lancozs3 interpolation.
 
-> ![NOTE]
+> [!NOTE]
 > [warframe-exports-data](https://github.com/Aericio/warframe-exports-data/) repository runs this tool hourly on weekdays, providing a fully pre-exported snapshot of all available content. You can easily use the exports in your own app through the jsDelivr CDN. Visit the data repository for more information.
 
 ## Outputs
