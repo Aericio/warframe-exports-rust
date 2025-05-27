@@ -1,7 +1,12 @@
+use fast_image_resize::images::Image;
+use fast_image_resize::{PixelType, ResizeOptions, Resizer};
+use image::codecs::png::PngEncoder;
+use image::ImageEncoder;
 use regex::{Captures, Regex};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::error::Error;
+use std::io::BufWriter;
 use std::path::Path;
 use std::sync::LazyLock;
 use tokio::fs;
@@ -11,6 +16,8 @@ pub static WARFRAME_CONTENT_URL: &'static str = "https://content.warframe.com";
 pub static LZMA_URL_PATH: &'static str = "/PublicExport/index_en.txt.lzma";
 pub static MANIFEST_PATH: &'static str = "/PublicExport/Manifest";
 pub static PUBLIC_EXPORT_PATH: &'static str = "/PublicExport";
+
+pub const IMAGE_SIZES: &[u32] = &[256, 128, 64, 32];
 
 pub static RE_ESCAPES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[\r\n]").unwrap());
 pub static UNWRAP_NONE: LazyLock<String> = LazyLock::new(|| String::from("None"));
@@ -31,10 +38,12 @@ pub struct ExportManifest {
 /// Configuration for downloading a file.
 /// - `url`: The URL of the file to be downloaded.
 /// - `path`: The local file path where the downloaded content will be saved.
+/// - `name`: The name of the file to be saved.
 /// - `as_text`: Whether content should be saved as text or as bytes.
 pub struct DownloadConfig {
     pub url: String,
     pub path: String,
+    pub name: String,
     pub as_text: bool,
 }
 
@@ -101,4 +110,42 @@ pub async fn load_hash_map_from_file(
     }
 
     Ok(BTreeMap::new())
+}
+
+/// Resizes an image to the specified square dimensions and encodes it as PNG.
+///
+/// # Arguments
+/// - `src_image` - A reference to the source image to resize.
+/// - `size` - The desired output size (width and height, in pixels).
+///
+/// # Returns
+/// - A `Vec<u8>` with PNG-encoded image bytes.
+pub async fn resize_image(
+    src_image: &Image<'static>,
+    size: u32,
+) -> Result<Vec<u8>, Box<dyn Error>> {
+    let mut dst_image = Image::new(size, size, PixelType::U8x4);
+    let mut resizer = Resizer::new();
+
+    resizer
+        .resize(
+            &src_image.copy(),
+            &mut dst_image,
+            &ResizeOptions::new().resize_alg(fast_image_resize::ResizeAlg::Interpolation(
+                fast_image_resize::FilterType::Lanczos3,
+            )),
+        )
+        .map_err(|e| format!("Resize failed: {:?}", e))?;
+
+    let mut result_buf = BufWriter::new(Vec::new());
+    PngEncoder::new(&mut result_buf)
+        .write_image(
+            dst_image.buffer(),
+            size,
+            size,
+            image::ExtendedColorType::Rgba8,
+        )
+        .map_err(|e| format!("Failed to encode image: {}", e))?;
+
+    Ok(result_buf.into_inner().unwrap())
 }

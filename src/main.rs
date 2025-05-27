@@ -1,3 +1,6 @@
+use fast_image_resize::images::Image;
+use fast_image_resize::PixelType;
+use image::ImageReader;
 use reqwest::Client;
 use reqwest::Url;
 use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
@@ -17,6 +20,7 @@ use warframe_exports::{
     // Functions
     escape_match,
     load_hash_map_from_file,
+    resize_image,
     split_string_to_resource,
 
     // Structs
@@ -26,6 +30,7 @@ use warframe_exports::{
     Resource,
 
     // Constants
+    IMAGE_SIZES,
     LZMA_URL_PATH,
     MANIFEST_PATH,
     PUBLIC_EXPORT_PATH,
@@ -65,6 +70,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
+    // Create missing resize-directory data folders.
+    for size in IMAGE_SIZES {
+        let folder = format!("{}/{}x{}", &storage_folders[1], size, size);
+        if Path::new(&folder).is_dir() == false {
+            println!("{} directory not found, initializing...", folder);
+            fs::create_dir(folder).await?;
+        }
+    }
+
     let mut updated_hash = false;
     let mut updated_manifest = false;
 
@@ -83,7 +97,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             Arc::new(split_string_to_resource(&line.to_string())?),
             Arc::new(DownloadConfig {
                 url: format!("{}{}/{}", WARFRAME_CONTENT_URL, MANIFEST_PATH, line),
-                path: format!("{}/{}", &storage_folders[2], &line[..(line.len() - 26)]),
+                path: storage_folders[2].clone(),
+                name: line[..(line.len() - 26)].to_string(),
                 as_text: true,
             }),
         )
@@ -136,15 +151,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     Arc::new(DownloadConfig {
                         url: format!(
                             "{}{}{}",
-                            WARFRAME_CONTENT_URL,
-                            PUBLIC_EXPORT_PATH,
-                            &texture_location
+                            WARFRAME_CONTENT_URL, PUBLIC_EXPORT_PATH, &texture_location
                         ),
-                        path: format!(
-                            "{}/{}.png",
-                            &storage_folders[1],
-                            &unique_name.replace("/", ".")[1..]
-                        ),
+                        path: storage_folders[1].clone(),
+                        name: format!("{}.png", &unique_name.replace("/", ".")[1..]),
                         as_text: false,
                     }),
                 )
@@ -278,17 +288,53 @@ async fn download_file(
     client: &ClientWithMiddleware,
     download_config: Arc<DownloadConfig>,
 ) -> Result<(), Box<dyn Error>> {
-    // println!("[DOWNLOAD] {}", download_config.url);
-
     let response = client.get(Url::parse(&download_config.url)?).send().await?;
 
     if download_config.as_text {
         let content = response.text().await?;
         let sanitized = RE_ESCAPES.replace_all(&content, escape_match).to_string();
-        fs::write(&download_config.path, sanitized).await?;
+        fs::write(
+            format!("{}/{}", &download_config.path, &download_config.name),
+            sanitized,
+        )
+        .await?;
     } else {
         let content = response.bytes().await?;
-        fs::write(&download_config.path, content).await?;
+        let reader = ImageReader::new(Cursor::new(&content)).with_guessed_format()?;
+
+        if let Ok(decoded) = reader.decode() {
+            let rgba_image = decoded.to_rgba8();
+            let (width, height) = rgba_image.dimensions();
+
+            let raw_image =
+                Image::from_vec_u8(width, height, rgba_image.into_raw(), PixelType::U8x4)?;
+
+            // Save the original image, but constrain to 512x512.
+            //  Some are originally over this size, while some are originally under.
+            let original_path = format!("{}/{}", &download_config.path, &download_config.name);
+            if width == 512 && height == 512 {
+                fs::write(&original_path, &content).await?;
+            } else {
+                let resized_buf = resize_image(&raw_image, 512).await?;
+                fs::write(&original_path, resized_buf).await?;
+            }
+
+            for size in IMAGE_SIZES {
+                let resized_buf = resize_image(&raw_image, *size).await?;
+                fs::write(
+                    format!(
+                        "{}/{}x{}/{}",
+                        &download_config.path, size, size, &download_config.name
+                    ),
+                    resized_buf,
+                )
+                .await?;
+            }
+
+            println!("[DOWNLOADED] ➞ {}", download_config.name);
+        } else {
+            return Err("Invalid or corrupt image format".into());
+        }
     }
 
     Ok(())
