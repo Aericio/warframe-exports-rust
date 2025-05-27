@@ -1,4 +1,4 @@
-# warframe-exports
+# warframe-exports [![](https://data.jsdelivr.com/v1/package/gh/aericio/warframe-exports-data/badge)](https://www.jsdelivr.com/package/gh/aericio/warframe-exports-data)
 
 This is a Rust-based tool for downloading Warframe public export data, like manifests and images, from the Warframe content server.
 
@@ -8,6 +8,9 @@ All exported content is provided as-is, if possible, from the content server. Mo
 - Downscaled versions of each image are stored in subfolders within `/image`, in the sizes `256x256`, `128x128`, `64x64`, and `32x32`.
   - Images in the root `/image` directory are rescaled to 512x512, if needed, for consistency; some images were originally smaller (e.g. `128x128`) or larger (e.g. `2048x2048`).
   - Scaling is performed using Lancozs3 interpolation.
+
+> ![NOTE]
+> [warframe-exports-data](https://github.com/Aericio/warframe-exports-data/) repository runs this tool hourly on weekdays, providing a fully pre-exported snapshot of all available content. You can easily use the exports in your own app through the jsDelivr CDN. Visit the data repository for more information.
 
 ## Outputs
 
