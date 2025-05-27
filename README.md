@@ -5,19 +5,30 @@ This is a Rust-based tool for downloading Warframe public export data, like mani
 All exported content is provided as-is, if possible, from the content server. Modifications are listed below:
 - `Export*.json` files contain text that include control characters (`\r`, `\n`), and are escaped during pre-processing.
 - All images are flattened to the `/image` directory, and use their `unique_name` as the file name with `/` replaced with `.`.
+- Downscaled versions of each image are stored in subfolders within `/image`, in the sizes `256x256`, `128x128`, `64x64`, and `32x32`.
+  - Images in the root `/image` directory are rescaled to 512x512, if needed, for consistency; some images were originally smaller (e.g. `128x128`) or larger (e.g. `2048x2048`).
+  - Scaling is performed using Lancozs3 interpolation.
 
 ## Outputs
 
 ```
-output
-├── export
+output/
+├── export/
 │   ├── ExportCustoms_en.json
 │   ├── ExportDrones_en.json
-│   ├── ...
-├── image
+│   └── ...
+├── image/
 │   ├── Lotus.Characters.Tenno.Accessory.Scarves.GrnBannerScarf.GrnBannerScarfItem.png
 │   ├── Lotus.Characters.Tenno.Accessory.Scarves.PrimeScarfD.Cloth.PrimeScarfDItem.png
-│   ├── ...
+│   ├── 256x256/
+│   │   ├── Lotus.Characters.Tenno.Accessory.Scarves.GrnBannerScarf.GrnBannerScarfItem.png
+│   │   └── ...
+│   ├── 128x128/
+│   │   └── ...
+│   ├── 64x64/
+│   │   └── ...
+│   └── 32x32/
+│       └── ...
 ├── export_hash.json
 └── image_hash.json
 ```
