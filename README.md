@@ -3,7 +3,7 @@
 This is a Rust-based tool for downloading Warframe public export data, like manifests and images, from the Warframe content server.
 
 All exported content is provided as-is, if possible, from the content server. Modifications are listed below:
-- `Export*.json` files contain text that include control characters (`\r`, `\n`), and are escaped during pre-processing.
+- `Export*.json` / `Export*.min.json` files contain text that include control characters (`\r`, `\n`), and are escaped during pre-processing.
 - All images are flattened to the `/image` directory, and use their `unique_name` as the file name with `/` replaced with `.`.
 - Downscaled versions of each image are stored in subfolders within `/image`, in the sizes `256x256`, `128x128`, `64x64`, and `32x32`.
   - Images in the root `/image` directory are rescaled to 512x512, if needed, for consistency; some images were originally smaller (e.g. `128x128`) or larger (e.g. `2048x2048`).
@@ -15,7 +15,9 @@ All exported content is provided as-is, if possible, from the content server. Mo
 output/
 ├── export/
 │   ├── ExportCustoms_en.json
+│   ├── ExportCustoms_en.min.json
 │   ├── ExportDrones_en.json
+│   ├── ExportDrones_en.min.json
 │   └── ...
 ├── image/
 │   ├── Lotus.Characters.Tenno.Accessory.Scarves.GrnBannerScarf.GrnBannerScarfItem.png

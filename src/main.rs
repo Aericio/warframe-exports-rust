@@ -98,7 +98,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             Arc::new(DownloadConfig {
                 url: format!("{}{}/{}", WARFRAME_CONTENT_URL, MANIFEST_PATH, line),
                 path: storage_folders[2].clone(),
-                name: line[..(line.len() - 26)].to_string(),
+                // Remove the last 31 characters, which is the ".json!" plus the 25-digit hash.
+                name: line[..(line.len() - 31)].to_string(),
                 as_text: true,
             }),
         )
@@ -293,11 +294,23 @@ async fn download_file(
     if download_config.as_text {
         let content = response.text().await?;
         let sanitized = RE_ESCAPES.replace_all(&content, escape_match).to_string();
+        let parsed_json: serde_json::Value = serde_json::from_str(&sanitized)?;
+
         fs::write(
-            format!("{}/{}", &download_config.path, &download_config.name),
-            sanitized,
+            format!(
+                "{}/{}.min.json",
+                &download_config.path, &download_config.name
+            ),
+            serde_json::to_string(&parsed_json)?,
         )
         .await?;
+        fs::write(
+            format!("{}/{}.json", &download_config.path, &download_config.name),
+            serde_json::to_string_pretty(&parsed_json)?,
+        )
+        .await?;
+
+        println!("[DOWNLOADED] ➞ {}", download_config.name);
     } else {
         let content = response.bytes().await?;
         let reader = ImageReader::new(Cursor::new(&content)).with_guessed_format()?;
