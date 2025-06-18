@@ -198,6 +198,14 @@ async fn download_export_index(client: &ClientWithMiddleware) -> Result<String, 
         .send()
         .await?;
 
+    if !response.status().is_success() {
+        return Err(format!(
+            "Failed to download export index: {}",
+            response.status()
+        )
+        .into());
+    }
+
     let bytes = response.bytes().await?;
     let cursor = Cursor::new(bytes);
 
@@ -290,6 +298,15 @@ async fn download_file(
     download_config: Arc<DownloadConfig>,
 ) -> Result<(), Box<dyn Error>> {
     let response = client.get(Url::parse(&download_config.url)?).send().await?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "Failed to download {}: {}",
+            download_config.name,
+            response.status()
+        )
+        .into());
+    }
 
     if download_config.as_text {
         let content = response.text().await?;
