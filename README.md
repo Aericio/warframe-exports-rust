@@ -42,4 +42,4 @@ output/
 
 - `OUTPUT_DIRECTORY`: Specify the output directory of the export files (default: `./output`)
 - `WARFRAME_ORIGIN_URL`: Specify a custom URL to access warframe origin (default: `https://origin.warframe.com`).
-- `PROXY_AUTH_TOKEN`: Specify an authorization token for `WARFRAME_ORIGIN_URL` requests (default: `none`).
+- `X_PROXY_AUTH`: Specify an authorization token for `WARFRAME_ORIGIN_URL` requests (default: `none`).

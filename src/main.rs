@@ -192,8 +192,8 @@ async fn download_export_index(client: &ClientWithMiddleware) -> Result<String, 
     let response = client
         .get(Url::parse(&lzma_url)?)
         .header(
-            "Authentication",
-            env::var("PROXY_AUTH_TOKEN").unwrap_or_default(),
+            "X-Proxy-Token",
+            env::var("X_PROXY_TOKEN").unwrap_or_default(),
         )
         .send()
         .await?;
