@@ -2183,7 +2183,7 @@ dependencies = [
 
 [[package]]
 name = "warframe-exports"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "fast_image_resize",
  "image",
